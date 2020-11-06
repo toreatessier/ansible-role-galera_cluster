@@ -1,0 +1,183 @@
+---
+- name: Set hostname to 'db1' in /etc/hosts
+  copy:
+    src: "{{ role_path }}/files/hosts"
+    dest: /etc/hosts
+
+- name: Set hostname to 'db1' in hostnamectl
+  command: hostnamectl set-hostname db1
+  when: db_node_no==1
+
+- name: Set hostname to 'db2' in /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127.0.1.1'
+    line: '127.0.1.1  db2'
+  when: db_node_no==2
+
+- name: Set hostname to 'db2' in hostnamectl
+  command: hostnamectl set-hostname db2
+  when: db_node_no==2
+
+- name: Set hostname to 'db3' in /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127.0.1.1'
+    line: '127.0.1.1  db3'
+  when: db_node_no==3
+
+- name: Set hostname to 'db3' in hostnamectl
+  command: hostnamectl set-hostname db3
+  when: db_node_no==3
+
+- name: Install packages for the cluster
+  apt:
+    name: ['software-properties-common', 'dirmngr', 'python3-software-properties', 'python3-pymysql', 'python-mysqldb']
+    state: present
+
+- name: Get key from keyserver.ubuntu.com
+  command: apt-key adv --recv-keys --keyserver keyserver.ubuntu.com 0xF1656F24C74CD1D8
+
+- name: Add mariaDB repository
+  apt_repository:
+    repo: deb [arch=amd64,i386,ppc64el] http://mariadb.mirror.nucleus.be/repo/10.1/debian stretch main
+    state: present
+    update_cache: yes #apt-get update
+
+- name: Install MariaDB server and Galera
+  apt:
+    name: ['galera', 'mariadb-server', 'mariadb-client']
+    state: present
+
+- name: Update /etc/mysql/conf.d/galera.cnf
+  copy:
+    src: "{{ role_path }}/files/galera.cnf"
+    dest: /etc/mysql/conf.d/galera.cnf
+
+- name: Update IP /etc/mysql/conf.d/galera.cnf on db2
+  lineinfile:
+    path: /etc/mysql/conf.d/galera.cnf
+    regexp: '^wsrep_node_address'
+    line: 'wsrep_node_address="{{ db_ip }}"'
+  when: db_node_no==2
+
+- name: Update node name /etc/mysql/conf.d/galera.cnf on db2
+  lineinfile:
+    path: /etc/mysql/conf.d/galera.cnf
+    regexp: '^wsrep_node_name'
+    line: 'wsrep_node_name="db2"'
+  when: db_node_no==2
+
+- name: Update /etc/mysql/conf.d/galera.cnf on db3
+  lineinfile:
+    path: /etc/mysql/conf.d/galera.cnf
+    regexp: '^wsrep_node_address'
+    line: 'wsrep_node_address="{{ db_ip }}"'
+  when: db_node_no==3
+
+- name: Update node name /etc/mysql/conf.d/galera.cnf on db3
+  lineinfile:
+    path: /etc/mysql/conf.d/galera.cnf
+    regexp: '^wsrep_node_name'
+    line: 'wsrep_node_name="db3"'
+  when: db_node_no==3
+
+- name: Reboot db2 and db3
+  reboot:
+  when: db_node_no!=1
+  
+- name: Stop MariaDB
+  systemd:
+    name: mysql
+    state: stopped
+
+- name: Init new cluster on db1
+  command: /usr/bin/galera_new_cluster
+  when: db_node_no==1
+
+- name: Restart mariadb everywhere
+  systemd:
+    name: mysql
+    state: started
+
+- name: Install Zabbix agent
+  apt:
+    name: zabbix-agent
+    state: present
+
+- name: Configure Zabbix agent
+  copy:
+    src: "{{ role_path }}/files/zabbix_agentd.conf"
+    dest: /etc/zabbix/zabbix_agentd.conf
+
+- name: Set hostname to in zabbix_agentd.conf
+  lineinfile:
+    path: /etc/zabbix/zabbix_agentd.conf
+    regexp: '^Hostname='
+    line: 'Hostname=db2'
+  when: db_node_no==2
+
+- name: Set hostname to in zabbix_agentd.conf
+  lineinfile:
+    path: /etc/zabbix/zabbix_agentd.conf
+    regexp: '^Hostname='
+    line: 'Hostname=db3'
+  when: db_node_no==3
+
+- name: Restart zabbix-agent service
+  systemd:
+    name: zabbix-agent
+    state: restarted
+
+- name: Set mysql variables pt 1
+  mysql_variables:
+    variable: innodb_file_format
+    value: Barracuda
+  
+- name: Set mysql variables pt 2
+  mysql_variables:
+    variable: innodb_file_per_table
+    value: 1
+  
+- name: Set mysql variables pt 3
+  mysql_variables:
+    variable: innodb_large_prefix
+    value: 1
+
+### ---------------------- Rudder agent installation ---------------------- ###
+- name: Install syslog-ng
+  apt:
+    name: syslog-ng
+    state: present
+
+- name: Get Rudder apt public key 
+  apt_key:
+    url: "{{ rudder_pubkey_url }}"
+    state: present
+
+- name: Add Rudder's repository
+  apt_repository:
+    repo: "{{ rudder_repo }}"
+    state: present
+    update_cache: yes #apt-get update
+
+# apt-get update
+- name: Update cache
+  apt:
+    update_cache: yes
+
+- name: Install Rudder agent
+  apt: 
+    name: rudder-agent
+    state: present
+
+- name: Configure Rudder agent
+  shell: "echo '{{ rudder_ip }}' > /var/rudder/cfengine-community/policy_server.dat"
+  args:
+    executable: /bin/bash
+
+- name: Start Rudder agent
+  shell: rudder agent start
+  args:
+    executable: /bin/bash
+### ----------------------------------------------------------------------- ###
